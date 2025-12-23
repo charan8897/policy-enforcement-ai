@@ -8,11 +8,16 @@ Automated policy extraction, rule generation, and request evaluation system usin
 
 ### Phase 1: Setup (One Time)
 
-#### Step 1: Extract Policy
-Extract text from PDF/DOCX/TXT policy documents.
+#### Step 1: Extract/Scrape Policy
 
+**Option A: From File (PDF/DOCX/TXT)**
 ```bash
 python3 extract_policy.py extract dopt_policy.pdf
+```
+
+**Option B: From Web URL**
+```bash
+python3 web_scraper_simple.py https://handbook.gitlab.com/handbook/finance/expenses/
 ```
 
 **Output:** `policy.txt` (extracted policy text)
