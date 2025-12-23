@@ -194,6 +194,19 @@ class RuleEvaluator:
         print(f"{'='*60}")
         print(f"[REQUEST] {json.dumps(request, indent=2)}")
         
+        # Validate required fields
+        required_fields = ['request_id', 'request_type']
+        missing_fields = [f for f in required_fields if f not in request]
+        if missing_fields:
+            print(f"\n[VALIDATION ERROR] Missing required fields: {missing_fields}")
+            return {
+                'decision': 'INVALID',
+                'primary_reason': f'Missing required fields: {", ".join(missing_fields)}',
+                'applicable_rules': [],
+                'violations': [],
+                'approvals': []
+            }
+        
         applicable_rules = []
         violations = []
         approvals = []
@@ -273,20 +286,53 @@ class RuleEvaluator:
         return True, "All conditions matched"
     
     def _evaluate_condition(self, request_value, operator, threshold):
-        """Evaluate single condition"""
-        if operator == 'equals':
-            return request_value == threshold
-        elif operator == 'greater_than':
-            return request_value > threshold
-        elif operator == 'less_than':
-            return request_value < threshold
-        elif operator == 'greater_than_or_equals':
-            return request_value >= threshold
-        elif operator == 'less_than_or_equals':
-            return request_value <= threshold
-        elif operator == 'in':
-            return request_value in threshold
-        else:
+        """Evaluate single condition with type validation"""
+        try:
+            # Type validation and coercion
+            if request_value is None:
+                return False
+            
+            # For numeric comparisons, ensure both values are numeric
+            if operator in ['greater_than', 'less_than', 'greater_than_or_equals', 'less_than_or_equals']:
+                # Check if values are numeric
+                if not isinstance(request_value, (int, float)):
+                    try:
+                        request_value = float(request_value)
+                    except (ValueError, TypeError):
+                        print(f"    [TYPE ERROR] Cannot convert '{request_value}' to number for {operator}")
+                        return False
+                
+                if not isinstance(threshold, (int, float)):
+                    try:
+                        threshold = float(threshold)
+                    except (ValueError, TypeError):
+                        print(f"    [TYPE ERROR] Threshold '{threshold}' is not numeric")
+                        return False
+                
+                # Range validation: reject negative days/durations
+                if request_value < 0:
+                    print(f"    [VALIDATION] Negative value {request_value} rejected")
+                    return False
+            
+            # Evaluate based on operator
+            if operator == 'equals':
+                return request_value == threshold
+            elif operator == 'greater_than':
+                return request_value > threshold
+            elif operator == 'less_than':
+                return request_value < threshold
+            elif operator == 'greater_than_or_equals':
+                return request_value >= threshold
+            elif operator == 'less_than_or_equals':
+                return request_value <= threshold
+            elif operator == 'in':
+                return request_value in threshold
+            else:
+                print(f"    [UNKNOWN OPERATOR] {operator}")
+                return False
+        
+        except Exception as e:
+            print(f"    [COMPARISON ERROR] {type(e).__name__}: {e}")
             return False
     
     def _display_result(self, result):
