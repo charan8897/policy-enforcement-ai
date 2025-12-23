@@ -25,10 +25,12 @@ class PolicyExtractor:
             raise FileNotFoundError(f"File not found: {input_file}")
     
     def detect_file_type(self):
-        """Detect if file is PDF, DOCX, or image-based PDF"""
+        """Detect if file is PDF, DOCX, TXT, or image-based PDF"""
         file_ext = Path(self.input_file).suffix.lower()
         
-        if file_ext == '.docx':
+        if file_ext == '.txt':
+            return 'txt'
+        elif file_ext == '.docx':
             return 'docx'
         elif file_ext == '.pdf':
             # Check if PDF is image-based or text-based
@@ -59,6 +61,17 @@ class PolicyExtractor:
         except Exception as e:
             print(f"Warning: Could not read PDF metadata: {e}")
             return 'pdf_text'  # Default to pdftotext if uncertain
+    
+    def extract_from_txt(self):
+        """Extract text from plain text file"""
+        print(f"[INFO] Detected: TXT file")
+        print(f"[INFO] Using: Direct read")
+        
+        try:
+            with open(self.input_file, 'r', encoding='utf-8') as f:
+                return f.read()
+        except Exception as e:
+            raise Exception(f"Text file read failed: {e}")
     
     def extract_from_docx(self):
         """Extract text from DOCX using Pandoc"""
@@ -145,7 +158,9 @@ class PolicyExtractor:
         print(f"[DETECT] File type: {file_type}")
         
         # Extract based on type
-        if file_type == 'docx':
+        if file_type == 'txt':
+            text = self.extract_from_txt()
+        elif file_type == 'docx':
             text = self.extract_from_docx()
         elif file_type == 'pdf_text':
             text = self.extract_from_pdf_text()
@@ -601,7 +616,7 @@ def main():
         # Step 2: Extract rules if requested
         if success and extract_rules:
             try:
-                api_key = "AIzaSyCPNw7Ee69hsFZpASSMDvXOTll1xybxJtY"
+                api_key = "AIzaSyBwRjRbssL6kxZPx55_I1yCONHdCZokM-c"
                 rule_extractor = RuleExtractor(api_key)
                 rules = rule_extractor.extract_rules()
                 rule_extractor.save_rules(rules)
