@@ -221,7 +221,7 @@ Command:"""
 
 def main():
     """Main entry point"""
-    api_key = "AIzaSyBNA3ulr_NxSCa8S3emQk_GH-jIwwydCdc"
+    api_key = "AIzaSyCPNw7Ee69hsFZpASSMDvXOTll1xybxJtY"
     
     if len(sys.argv) > 1:
         # Single query mode

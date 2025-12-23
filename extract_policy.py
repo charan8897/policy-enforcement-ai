@@ -194,8 +194,8 @@ class RuleEvaluator:
         print(f"{'='*60}")
         print(f"[REQUEST] {json.dumps(request, indent=2)}")
         
-        # Validate required fields
-        required_fields = ['request_id', 'request_type']
+        # Validate required fields (request_id is always required)
+        required_fields = ['request_id']
         missing_fields = [f for f in required_fields if f not in request]
         if missing_fields:
             print(f"\n[VALIDATION ERROR] Missing required fields: {missing_fields}")
@@ -238,7 +238,7 @@ class RuleEvaluator:
                         'severity': rule.get('severity', 'MEDIUM')
                     })
         
-        # Build decision
+        # Build decision (Whitelist approach: only approve what's explicitly allowed)
         if violations:
             decision = 'REJECT'
             primary_reason = violations[0]['message']
@@ -246,8 +246,8 @@ class RuleEvaluator:
             decision = 'APPROVE'
             primary_reason = 'Request complies with all policies'
         else:
-            decision = 'APPROVE'
-            primary_reason = 'Request complies with all policies'
+            decision = 'REJECT'
+            primary_reason = 'Request type not recognized or no applicable policy rules found'
         
         result = {
             'decision': decision,
@@ -360,7 +360,14 @@ class RuleExtractor:
     def __init__(self, api_key, policy_file="policy.txt", output_file="rules.json"):
         """Initialize with Gemini API"""
         genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel('gemini-2.5-flash')
+        # Use deterministic settings: temperature=0 for consistency
+        self.model = genai.GenerativeModel(
+            'gemma-3-27b-it',
+            generation_config=genai.types.GenerationConfig(
+                temperature=0,  # Deterministic output
+                top_p=0.95
+            )
+        )
         self.policy_file = policy_file
         self.output_file = output_file
         
@@ -525,10 +532,27 @@ JSON:"""
         return '\n'.join(section) if section else ""
     
     def save_rules(self, rules):
-        """Save rules to JSON"""
-        with open(self.output_file, 'w') as f:
-            json.dump(rules, f, indent=2)
-        print(f"[SAVED] {self.output_file} ({len(rules)} rules)")
+         """Save rules to JSON with deduplication"""
+         # Deduplicate by rule_id
+         unique_rules = {}
+         for rule in rules:
+             rule_id = rule.get('rule_id', '')
+             if rule_id not in unique_rules:
+                 unique_rules[rule_id] = rule
+             else:
+                 # Keep the more detailed version
+                 if len(json.dumps(rule)) > len(json.dumps(unique_rules[rule_id])):
+                     unique_rules[rule_id] = rule
+         
+         deduped_rules = list(unique_rules.values())
+         
+         with open(self.output_file, 'w') as f:
+             json.dump(deduped_rules, f, indent=2)
+         
+         if len(deduped_rules) < len(rules):
+             print(f"[SAVED] {self.output_file} ({len(rules)} → {len(deduped_rules)} rules, deduplicated)")
+         else:
+             print(f"[SAVED] {self.output_file} ({len(deduped_rules)} rules)")
     
     def validate(self, rules):
         """Validate rules"""
@@ -549,11 +573,14 @@ def main():
         print("Usage: python extract_policy.py <command> [options]")
         print("\nCommands:")
         print("  extract <file.pdf|.docx>          # Extract policy text")
-        print("  extract <file.pdf|.docx> --rules  # Extract text + rules")
+        print("  extract <file.pdf|.docx> --rules  # Extract text + rules (uses cache if available)")
         print("  evaluate <request.json>           # Evaluate request against rules.json")
+        print("\nOptions:")
+        print("  --no-cache                        # Force regenerate rules (ignore cache)")
         print("\nExamples:")
         print("  python extract_policy.py extract leave-policy.docx")
         print("  python extract_policy.py extract policy.pdf --rules")
+        print("  python extract_policy.py extract policy.pdf --rules --no-cache  # Regenerate")
         print("  python extract_policy.py evaluate request.json")
         sys.exit(1)
     
@@ -574,7 +601,7 @@ def main():
         # Step 2: Extract rules if requested
         if success and extract_rules:
             try:
-                api_key = "AIzaSyBNA3ulr_NxSCa8S3emQk_GH-jIwwydCdc"
+                api_key = "AIzaSyCPNw7Ee69hsFZpASSMDvXOTll1xybxJtY"
                 rule_extractor = RuleExtractor(api_key)
                 rules = rule_extractor.extract_rules()
                 rule_extractor.save_rules(rules)
