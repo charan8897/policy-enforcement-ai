@@ -372,36 +372,89 @@ class RuleExtractor:
             self.policy_text = f.read()
     
     def extract_rules(self):
-        """Extract all rules from policy text"""
+        """Extract all rules from policy text dynamically"""
         print(f"\n{'='*60}")
         print(f"Rule Extraction from Policy")
         print(f"{'='*60}")
         
-        # Define leave types to extract
-        leave_types = ['Casual Leave', 'Earned Leave', 'Sick Leave', 'Maternity Leave', 'Paternity Leave']
+        # Step 1: Detect policy types dynamically
+        policy_types = self._detect_policy_types()
+        
+        if not policy_types:
+            print("[WARNING] No policy types detected, attempting general extraction")
+            policy_types = ['General Policy']
+        
+        print(f"[DETECTED] {len(policy_types)} policy types:")
+        for ptype in policy_types:
+            print(f"  - {ptype}")
+        
+        # Step 2: Extract rules for each detected type
         all_rules = []
         rule_counter = 1
         
-        for leave_type in leave_types:
-            print(f"[EXTRACTING] {leave_type}...")
-            rules = self._extract_leave_type_rules(leave_type, rule_counter)
+        for policy_type in policy_types:
+            print(f"\n[EXTRACTING] {policy_type}...")
+            rules = self._extract_rules_for_type(policy_type, rule_counter)
             
             if rules:
                 all_rules.extend(rules)
                 rule_counter += len(rules)
                 print(f"  ✓ {len(rules)} rules found")
+            else:
+                print(f"  - No rules extracted")
         
         print(f"\n[TOTAL] {len(all_rules)} rules extracted")
         return all_rules
     
-    def _extract_leave_type_rules(self, leave_type, rule_start_id):
-        """Extract rules for specific leave type"""
+    def _detect_policy_types(self):
+        """Detect policy types dynamically from document"""
+        print("[DETECTING] Policy types from document...")
+        
+        # Ask LLM to detect what policies are in the document
+        prompt = f"""
+Analyze this policy document and list all main policy types/categories mentioned.
+
+Document excerpt (first 3000 chars):
+{self.policy_text[:3000]}
+
+Return ONLY a JSON array of policy names (strings), no explanation.
+Example: ["Leave Policy", "Recruitment Policy", "Code of Conduct"]
+
+Important: Extract the actual policy names from the document, not generic ones.
+
+JSON array:"""
+        
+        try:
+            response = self.model.generate_content(prompt)
+            response_text = response.text.strip()
+            
+            # Extract JSON
+            start = response_text.find('[')
+            end = response_text.rfind(']') + 1
+            
+            if start < 0 or end <= start:
+                return []
+            
+            json_str = response_text[start:end]
+            policy_types = json.loads(json_str)
+            
+            # Filter out empty strings
+            policy_types = [p.strip() for p in policy_types if p.strip()]
+            
+            return policy_types
+        
+        except Exception as e:
+            print(f"  [ERROR] Policy detection failed: {e}")
+            return []
+    
+    def _extract_rules_for_type(self, policy_type, rule_start_id):
+        """Extract rules for specific policy type"""
         
         # Search policy for relevant section
-        section = self._get_policy_section(leave_type)
+        section = self._get_policy_section(policy_type)
         
         prompt = f"""
-Extract all policy rules for "{leave_type}". Return ONLY valid JSON array.
+Extract all policy rules for "{policy_type}". Return ONLY valid JSON array.
 
 Policy section:
 {section[:2000]}
@@ -409,9 +462,9 @@ Policy section:
 Example format:
 [
   {{
-    "rule_id": "RULE_CL_001",
-    "policy_id": "POL_CASUAL_LEAVE",
-    "policy_name": "{leave_type} Policy",
+    "rule_id": "RULE_001",
+    "policy_id": "POL_{policy_type.upper().replace(' ', '_')}",
+    "policy_name": "{policy_type}",
     "conditions": [{{"field": "field_name", "operator": "equals", "value": "value"}}],
     "action": "ELIGIBLE",
     "allocation": 8,
@@ -445,8 +498,8 @@ JSON:"""
             
             # Update rule IDs
             for i, rule in enumerate(rules):
-                leave_prefix = leave_type.split()[0][:2].upper()
-                rule['rule_id'] = f"RULE_{leave_prefix}_{rule_start_id + i:03d}"
+                policy_prefix = policy_type.split()[0][:3].upper()
+                rule['rule_id'] = f"RULE_{policy_prefix}_{rule_start_id + i:03d}"
             
             return rules
         
