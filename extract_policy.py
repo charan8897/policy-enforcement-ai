@@ -176,13 +176,145 @@ class PolicyExtractor:
             return False
 
 
+class RuleEvaluator:
+    """Evaluate user requests against extracted rules"""
+    
+    def __init__(self, rules_file="rules.json"):
+        """Initialize with rules"""
+        if not os.path.exists(rules_file):
+            raise FileNotFoundError(f"Rules file not found: {rules_file}")
+        
+        with open(rules_file, 'r') as f:
+            self.rules = json.load(f)
+    
+    def evaluate(self, request):
+        """Evaluate request against rules"""
+        print(f"\n{'='*60}")
+        print(f"Request Evaluation")
+        print(f"{'='*60}")
+        print(f"[REQUEST] {json.dumps(request, indent=2)}")
+        
+        applicable_rules = []
+        violations = []
+        approvals = []
+        
+        # Check each rule
+        for rule in self.rules:
+            match, reason = self._evaluate_rule(rule, request)
+            
+            if match:
+                applicable_rules.append(rule['rule_id'])
+                
+                if rule['action'] == 'REJECT':
+                    violations.append({
+                        'rule_id': rule['rule_id'],
+                        'message': rule['message'],
+                        'severity': rule.get('severity', 'MEDIUM')
+                    })
+                elif rule['action'] == 'ELIGIBLE':
+                    approvals.append({
+                        'rule_id': rule['rule_id'],
+                        'allocation': rule.get('allocation'),
+                        'period': rule.get('period')
+                    })
+                elif rule['action'] == 'REQUIRE_DOCUMENTATION':
+                    violations.append({
+                        'rule_id': rule['rule_id'],
+                        'message': rule['message'],
+                        'required_doc': rule.get('required_doc'),
+                        'severity': rule.get('severity', 'MEDIUM')
+                    })
+        
+        # Build decision
+        if violations:
+            decision = 'REJECT'
+            primary_reason = violations[0]['message']
+        elif approvals:
+            decision = 'APPROVE'
+            primary_reason = 'Request complies with all policies'
+        else:
+            decision = 'APPROVE'
+            primary_reason = 'Request complies with all policies'
+        
+        result = {
+            'decision': decision,
+            'primary_reason': primary_reason,
+            'applicable_rules': applicable_rules,
+            'violations': violations,
+            'approvals': approvals
+        }
+        
+        self._display_result(result)
+        return result
+    
+    def _evaluate_rule(self, rule, request):
+        """Check if rule conditions match request"""
+        conditions = rule.get('conditions', [])
+        
+        if not conditions:
+            return False, "No conditions"
+        
+        # All conditions must match (AND logic)
+        for condition in conditions:
+            field = condition.get('field')
+            operator = condition.get('operator')
+            value = condition.get('value')
+            
+            # Get value from request
+            request_value = request.get(field)
+            
+            if request_value is None:
+                return False, f"Field {field} not in request"
+            
+            # Evaluate operator
+            if not self._evaluate_condition(request_value, operator, value):
+                return False, f"Field {field} does not match"
+        
+        return True, "All conditions matched"
+    
+    def _evaluate_condition(self, request_value, operator, threshold):
+        """Evaluate single condition"""
+        if operator == 'equals':
+            return request_value == threshold
+        elif operator == 'greater_than':
+            return request_value > threshold
+        elif operator == 'less_than':
+            return request_value < threshold
+        elif operator == 'greater_than_or_equals':
+            return request_value >= threshold
+        elif operator == 'less_than_or_equals':
+            return request_value <= threshold
+        elif operator == 'in':
+            return request_value in threshold
+        else:
+            return False
+    
+    def _display_result(self, result):
+        """Display evaluation result"""
+        print(f"\n[DECISION] {result['decision']}")
+        print(f"[REASON] {result['primary_reason']}")
+        
+        if result['violations']:
+            print(f"\n[VIOLATIONS] {len(result['violations'])}")
+            for v in result['violations']:
+                print(f"  ✗ {v['rule_id']}: {v['message']}")
+        
+        if result['approvals']:
+            print(f"\n[APPROVALS] {len(result['approvals'])}")
+            for a in result['approvals']:
+                alloc = a.get('allocation')
+                period = a.get('period', '')
+                if alloc:
+                    print(f"  ✓ {a['rule_id']}: {alloc} {period}")
+
+
 class RuleExtractor:
     """Extract structured rules from policy text using LLM"""
     
     def __init__(self, api_key, policy_file="policy.txt", output_file="rules.json"):
         """Initialize with Gemini API"""
         genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel('gemma-3-27b-it')
+        self.model = genai.GenerativeModel('gemini-2.5-flash')
         self.policy_file = policy_file
         self.output_file = output_file
         
@@ -199,76 +331,31 @@ class RuleExtractor:
         print(f"Rule Extraction from Policy")
         print(f"{'='*60}")
         
-        # Step 1: Detect policy type
-        policy_type = self._detect_policy_type()
-        print(f"[DETECTED] Policy type: {policy_type}")
-        
-        # Step 2: Get rule categories based on policy type
-        rule_categories = self._get_rule_categories(policy_type)
-        print(f"[CATEGORIES] {', '.join(rule_categories)}")
-        
-        # Step 3: Extract rules for each category
+        # Define leave types to extract
+        leave_types = ['Casual Leave', 'Earned Leave', 'Sick Leave', 'Maternity Leave', 'Paternity Leave']
         all_rules = []
         rule_counter = 1
         
-        for category in rule_categories:
-            print(f"[EXTRACTING] {category}...")
-            rules = self._extract_category_rules(category, policy_type, rule_counter)
+        for leave_type in leave_types:
+            print(f"[EXTRACTING] {leave_type}...")
+            rules = self._extract_leave_type_rules(leave_type, rule_counter)
             
             if rules:
                 all_rules.extend(rules)
                 rule_counter += len(rules)
                 print(f"  ✓ {len(rules)} rules found")
-            else:
-                print(f"  - No rules found")
         
         print(f"\n[TOTAL] {len(all_rules)} rules extracted")
         return all_rules
     
-    def _detect_policy_type(self):
-        """Detect the type of policy document"""
-        text_lower = self.policy_text.lower()
-        
-        # Policy type detection patterns
-        patterns = {
-            'leave_policy': ['leave', 'casual', 'earned', 'maternity', 'paternity'],
-            'travel_policy': ['overseas', 'business travel', 'travel allowance', 'daily allowance', 'flight', 'hotel'],
-            'procurement_policy': ['procurement', 'vendor', 'bidding', 'purchase', 'contract'],
-            'attendance_policy': ['attendance', 'attendance policy', 'working hours', 'shift'],
-            'expense_policy': ['expense', 'reimbursement', 'claim', 'allowance'],
-        }
-        
-        # Count pattern matches
-        matches = {}
-        for policy_type, keywords in patterns.items():
-            count = sum(1 for keyword in keywords if keyword in text_lower)
-            matches[policy_type] = count
-        
-        # Return most matched policy type
-        best_match = max(matches, key=matches.get)
-        return best_match if matches[best_match] > 0 else 'general_policy'
-    
-    def _get_rule_categories(self, policy_type):
-        """Get rule categories based on policy type"""
-        categories_map = {
-            'leave_policy': ['Casual Leave', 'Earned Leave', 'Sick Leave', 'Maternity Leave', 'Paternity Leave'],
-            'travel_policy': ['Flight Class', 'Daily Allowance', 'Hotel Accommodation', 'Foreign Exchange', 'Visa'],
-            'procurement_policy': ['Vendor Eligibility', 'Bidding Process', 'Contract Terms', 'Payment Terms'],
-            'attendance_policy': ['Working Hours', 'Shift Timings', 'Leave Application', 'Attendance Rules'],
-            'expense_policy': ['Expense Categories', 'Reimbursement Limits', 'Approval Authority', 'Documentation'],
-            'general_policy': ['General Rules', 'Procedures', 'Conditions', 'Requirements']
-        }
-        
-        return categories_map.get(policy_type, categories_map['general_policy'])
-    
-    def _extract_category_rules(self, category, policy_type, rule_start_id):
-        """Extract rules for specific category"""
+    def _extract_leave_type_rules(self, leave_type, rule_start_id):
+        """Extract rules for specific leave type"""
         
         # Search policy for relevant section
-        section = self._get_policy_section(category)
+        section = self._get_policy_section(leave_type)
         
         prompt = f"""
-Extract all policy rules for "{category}". Return ONLY valid JSON array.
+Extract all policy rules for "{leave_type}". Return ONLY valid JSON array.
 
 Policy section:
 {section[:2000]}
@@ -277,8 +364,8 @@ Example format:
 [
   {{
     "rule_id": "RULE_CL_001",
-    "policy_id": "POL_{category.upper().replace(' ', '_')}",
-    "policy_name": "{category} Policy",
+    "policy_id": "POL_CASUAL_LEAVE",
+    "policy_name": "{leave_type} Policy",
     "conditions": [{{"field": "field_name", "operator": "equals", "value": "value"}}],
     "action": "ELIGIBLE",
     "allocation": 8,
@@ -312,8 +399,8 @@ JSON:"""
             
             # Update rule IDs
             for i, rule in enumerate(rules):
-                category_prefix = category.split()[0][:2].upper()
-                rule['rule_id'] = f"RULE_{category_prefix}_{rule_start_id + i:03d}"
+                leave_prefix = leave_type.split()[0][:2].upper()
+                rule['rule_id'] = f"RULE_{leave_prefix}_{rule_start_id + i:03d}"
             
             return rules
         
@@ -360,32 +447,75 @@ JSON:"""
 def main():
     """Main entry point"""
     if len(sys.argv) < 2:
-        print("Usage: python extract_policy.py <input_file.pdf|.docx> [--rules]")
+        print("Usage: python extract_policy.py <command> [options]")
+        print("\nCommands:")
+        print("  extract <file.pdf|.docx>          # Extract policy text")
+        print("  extract <file.pdf|.docx> --rules  # Extract text + rules")
+        print("  evaluate <request.json>           # Evaluate request against rules.json")
         print("\nExamples:")
-        print("  python extract_policy.py leave-policy.docx          # Extract text only")
-        print("  python extract_policy.py leave-policy.docx --rules  # Extract text + rules")
+        print("  python extract_policy.py extract leave-policy.docx")
+        print("  python extract_policy.py extract policy.pdf --rules")
+        print("  python extract_policy.py evaluate request.json")
         sys.exit(1)
     
-    input_file = sys.argv[1]
-    extract_rules = '--rules' in sys.argv
+    command = sys.argv[1]
     
-    # Step 1: Extract policy text
-    extractor = PolicyExtractor(input_file)
-    success = extractor.process()
+    if command == 'extract':
+        if len(sys.argv) < 3:
+            print("[ERROR] Missing policy file")
+            sys.exit(1)
+        
+        input_file = sys.argv[2]
+        extract_rules = '--rules' in sys.argv
+        
+        # Step 1: Extract policy text
+        extractor = PolicyExtractor(input_file)
+        success = extractor.process()
+        
+        # Step 2: Extract rules if requested
+        if success and extract_rules:
+            try:
+                api_key = "AIzaSyBNA3ulr_NxSCa8S3emQk_GH-jIwwydCdc"
+                rule_extractor = RuleExtractor(api_key)
+                rules = rule_extractor.extract_rules()
+                rule_extractor.save_rules(rules)
+                rule_extractor.validate(rules)
+            except Exception as e:
+                print(f"\n[ERROR] Rule extraction failed: {e}")
+                success = False
+        
+        sys.exit(0 if success else 1)
     
-    # Step 2: Extract rules if requested
-    if success and extract_rules:
+    elif command == 'evaluate':
+        if len(sys.argv) < 3:
+            print("[ERROR] Missing request file")
+            sys.exit(1)
+        
+        request_file = sys.argv[2]
+        
         try:
-            api_key = "AIzaSyBNA3ulr_NxSCa8S3emQk_GH-jIwwydCdc"
-            rule_extractor = RuleExtractor(api_key)
-            rules = rule_extractor.extract_rules()
-            rule_extractor.save_rules(rules)
-            rule_extractor.validate(rules)
+            # Load request
+            with open(request_file, 'r') as f:
+                request = json.load(f)
+            
+            # Evaluate
+            evaluator = RuleEvaluator()
+            result = evaluator.evaluate(request)
+            
+            # Save result
+            result_file = request_file.replace('.json', '_result.json')
+            with open(result_file, 'w') as f:
+                json.dump(result, f, indent=2)
+            print(f"\n[SAVED] {result_file}")
+            
+            sys.exit(0)
         except Exception as e:
-            print(f"\n[ERROR] Rule extraction failed: {e}")
-            success = False
+            print(f"\n[ERROR] {e}")
+            sys.exit(1)
     
-    sys.exit(0 if success else 1)
+    else:
+        print(f"[ERROR] Unknown command: {command}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
