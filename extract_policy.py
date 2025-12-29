@@ -14,12 +14,26 @@ import google.generativeai as genai
 from pathlib import Path
 from PIL import Image
 import io
+import shutil
+
+# RAG imports
+try:
+    import chromadb
+except ImportError:
+    chromadb = None
+
+try:
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+except ImportError:
+    RecursiveCharacterTextSplitter = None
 
 class PolicyExtractor:
     def __init__(self, input_file):
         """Initialize with input file path"""
         self.input_file = input_file
-        self.output_file = "policy.txt"
+        # self.output_file = "policy.txt"  # COMMENTED OUT - using RAG
+        self.db_path = "./chroma_db"
+        self.db_name = "policies"
         
         if not os.path.exists(input_file):
             raise FileNotFoundError(f"File not found: {input_file}")
@@ -171,21 +185,52 @@ class PolicyExtractor:
         
         return text
     
-    def save_output(self, text):
-        """Save extracted text to output file"""
-        with open(self.output_file, 'w', encoding='utf-8') as f:
-            f.write(text)
+    def save_to_rag(self, text, file_id=None):
+        """Save extracted text to Chroma vector DB (RAG)"""
+        if not chromadb or not RecursiveCharacterTextSplitter:
+            print("[ERROR] Missing dependencies. Install with: pip install chromadb langchain")
+            return False
         
-        print(f"[OUTPUT] Saved to: {self.output_file}")
-        print(f"[OUTPUT] Size: {len(text)} characters, {len(text.split())} words")
-        print(f"{'='*60}\n")
+        try:
+            print(f"\n[RAG] Initializing vector DB...")
+            client = chromadb.PersistentClient(path=self.db_path)
+            collection = client.get_or_create_collection(name=self.db_name, metadata={"hnsw:space": "cosine"})
+            
+            print(f"[RAG] Splitting text into chunks...")
+            splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100, separators=["\n\n", "\n", ".", " ", ""])
+            chunks = splitter.split_text(text)
+            
+            doc_id = file_id or Path(self.input_file).stem
+            print(f"[RAG] Adding {len(chunks)} chunks to vector DB...")
+            ids = [f"{doc_id}_chunk_{i}" for i in range(len(chunks))]
+            metadatas = [{"source": self.input_file, "chunk": i} for i in range(len(chunks))]
+            collection.add(documents=chunks, ids=ids, metadatas=metadatas)
+            
+            print(f"[OUTPUT] Vector DB: {self.db_path}/{self.db_name}")
+            print(f"[OUTPUT] Size: {len(text)} characters, {len(text.split())} words")
+            print(f"[OUTPUT] Chunks: {len(chunks)}")
+            print(f"{'='*60}\n")
+            return True
+        except Exception as e:
+            print(f"[ERROR] Failed to save to RAG: {e}")
+            return False
+    
+    # COMMENTED OUT - using RAG instead
+    # def save_output(self, text):
+    #     """Save extracted text to output file"""
+    #     with open(self.output_file, 'w', encoding='utf-8') as f:
+    #         f.write(text)
+    #     
+    #     print(f"[OUTPUT] Saved to: {self.output_file}")
+    #     print(f"[OUTPUT] Size: {len(text)} characters, {len(text.split())} words")
+    #     print(f"{'='*60}\n")
     
     def process(self):
         """Run complete extraction pipeline"""
         try:
             text = self.extract_text()
-            self.save_output(text)
-            return True
+            # self.save_output(text)  # COMMENTED OUT
+            return self.save_to_rag(text)  # Use RAG instead
         except Exception as e:
             print(f"\n[ERROR] {e}\n")
             return False
@@ -194,13 +239,23 @@ class PolicyExtractor:
 class RuleEvaluator:
     """Evaluate user requests against extracted rules"""
     
-    def __init__(self, rules_file="rules.json"):
-        """Initialize with rules"""
+    def __init__(self, rules_file="rules.json", db_path="rules.db"):
+        """Initialize with rules and dynamic grade evaluator"""
         if not os.path.exists(rules_file):
             raise FileNotFoundError(f"Rules file not found: {rules_file}")
         
         with open(rules_file, 'r') as f:
             self.rules = json.load(f)
+        
+        # Initialize dynamic grade evaluator
+        try:
+            from grade_hierarchy_manager import DynamicGradeEvaluator
+            self.grade_evaluator = DynamicGradeEvaluator(db_path)
+            print(f"[GRADES] Using dynamic grade hierarchy from {db_path}")
+        except Exception as e:
+            print(f"[WARNING] Could not load dynamic grades: {e}")
+            print("[WARNING] Falling back to hardcoded grade hierarchy")
+            self.grade_evaluator = None
     
     def evaluate(self, request):
         """Evaluate request against rules"""
@@ -280,7 +335,9 @@ class RuleEvaluator:
         conditions = rule.get('conditions', [])
         
         if not conditions:
-            return False, "No conditions"
+            # Rules with no conditions are not applicable (skip them)
+            # Only rules with explicit conditions can be matched
+            return False, "No conditions specified"
         
         # All conditions must match (AND logic)
         for condition in conditions:
@@ -300,6 +357,22 @@ class RuleEvaluator:
         
         return True, "All conditions matched"
     
+    def _grade_to_numeric(self, grade):
+        """Convert grade string to numeric value for comparison"""
+        # Always use dynamic grade evaluator from database
+        if self.grade_evaluator:
+            level = self.grade_evaluator.get_grade_level(grade)
+            if level is not None:
+                return level
+        
+        # Fallback: try numeric conversion (for numeric grades like "1", "2", etc.)
+        try:
+            return float(grade)
+        except (ValueError, TypeError):
+            # Grade not found - log warning
+            print(f"    [WARNING] Grade '{grade}' not found in database")
+            return None
+    
     def _evaluate_condition(self, request_value, operator, threshold):
         """Evaluate single condition with type validation"""
         try:
@@ -309,25 +382,33 @@ class RuleEvaluator:
             
             # For numeric comparisons, ensure both values are numeric
             if operator in ['greater_than', 'less_than', 'greater_than_or_equals', 'less_than_or_equals']:
-                # Check if values are numeric
-                if not isinstance(request_value, (int, float)):
+                # Try grade conversion first
+                request_numeric = self._grade_to_numeric(request_value)
+                threshold_numeric = self._grade_to_numeric(threshold)
+                
+                # If grade conversion failed, try numeric conversion
+                if request_numeric is None:
                     try:
-                        request_value = float(request_value)
+                        request_numeric = float(request_value)
                     except (ValueError, TypeError):
                         print(f"    [TYPE ERROR] Cannot convert '{request_value}' to number for {operator}")
                         return False
                 
-                if not isinstance(threshold, (int, float)):
+                if threshold_numeric is None:
                     try:
-                        threshold = float(threshold)
+                        threshold_numeric = float(threshold)
                     except (ValueError, TypeError):
                         print(f"    [TYPE ERROR] Threshold '{threshold}' is not numeric")
                         return False
                 
                 # Range validation: reject negative days/durations
-                if request_value < 0:
-                    print(f"    [VALIDATION] Negative value {request_value} rejected")
+                if request_numeric < 0:
+                    print(f"    [VALIDATION] Negative value {request_numeric} rejected")
                     return False
+                
+                # Use numeric values for comparison
+                request_value = request_numeric
+                threshold = threshold_numeric
             
             # Evaluate based on operator
             if operator == 'equals':
@@ -372,8 +453,8 @@ class RuleEvaluator:
 class RuleExtractor:
     """Extract structured rules from policy text using LLM"""
     
-    def __init__(self, api_key, policy_file="policy.txt", output_file="rules.json"):
-        """Initialize with Gemini API"""
+    def __init__(self, api_key, db_path="./chroma_db", db_name="policies", output_file="rules.json"):
+        """Initialize with Gemini API and Chroma vector DB"""
         genai.configure(api_key=api_key)
         # Use deterministic settings: temperature=0 for consistency
         self.model = genai.GenerativeModel(
@@ -383,15 +464,20 @@ class RuleExtractor:
                 top_p=0.95
             )
         )
-        self.policy_file = policy_file
+        self.db_path = db_path
+        self.db_name = db_name
         self.output_file = output_file
         
-        # Read policy
-        if not os.path.exists(policy_file):
-            raise FileNotFoundError(f"Policy file not found: {policy_file}")
+        # Initialize Chroma client
+        if not chromadb:
+            raise Exception("Chroma not installed. Install with: pip install chromadb langchain")
         
-        with open(policy_file, 'r') as f:
-            self.policy_text = f.read()
+        self.client = chromadb.PersistentClient(path=self.db_path)
+        try:
+            self.collection = self.client.get_collection(name=self.db_name)
+            print(f"[RAG] Connected to vector DB: {self.db_path}/{self.db_name}")
+        except Exception as e:
+            raise Exception(f"Vector DB not found. Run extraction first: {e}")
     
     def extract_rules(self):
         """Extract all rules from policy text dynamically"""
@@ -429,22 +515,31 @@ class RuleExtractor:
         return all_rules
     
     def _detect_policy_types(self):
-        """Detect policy types dynamically from document"""
-        print("[DETECTING] Policy types from document...")
+        """Detect policy types dynamically from RAG vector DB"""
+        print("[DETECTING] Policy types from vector DB...")
+        
+        # Query RAG for documents
+        try:
+            results = self.collection.get(limit=20)
+            all_text = "\n".join(results['documents'][:10])
+            print(f"[DEBUG] Retrieved {len(results['documents'])} chunks from DB")
+        except Exception as e:
+            print(f"[ERROR] Could not query vector DB: {e}")
+            return []
         
         # Ask LLM to detect what policies are in the document
         prompt = f"""
-Analyze this policy document and list all main policy types/categories mentioned.
+    Analyze this policy document and list all main policy types/categories mentioned.
 
-Document excerpt (first 3000 chars):
-{self.policy_text[:3000]}
+    Document excerpt:
+    {all_text[:3000]}
 
-Return ONLY a JSON array of policy names (strings), no explanation.
-Example: ["Leave Policy", "Recruitment Policy", "Code of Conduct"]
+    Return ONLY a JSON array of policy names (strings), no explanation.
+    Example: ["Leave Policy", "Recruitment Policy", "Code of Conduct"]
 
-Important: Extract the actual policy names from the document, not generic ones.
+    Important: Extract the actual policy names from the document, not generic ones.
 
-JSON array:"""
+    JSON array:"""
         
         try:
             response = self.model.generate_content(prompt)
@@ -470,9 +565,10 @@ JSON array:"""
             return []
     
     def _extract_rules_for_type(self, policy_type, rule_start_id):
-        """Extract rules for specific policy type"""
+        """Extract rules for specific policy type using RAG"""
         
-        # Search policy for relevant section
+        # Search RAG for relevant chunks
+        print(f"  [RAG] Querying for '{policy_type}'...")
         section = self._get_policy_section(policy_type)
         
         prompt = f"""
@@ -518,10 +614,17 @@ JSON:"""
             json_str = response_text[start:end]
             rules = json.loads(json_str)
             
-            # Update rule IDs
+            # Update rule IDs and add RAG chunk references
             for i, rule in enumerate(rules):
                 policy_prefix = policy_type.split()[0][:3].upper()
                 rule['rule_id'] = f"RULE_{policy_prefix}_{rule_start_id + i:03d}"
+                # Track RAG source for traceability
+                rule['_source'] = {
+                    'type': 'RAG_VECTOR_DB',
+                    'db_path': self.db_path,
+                    'query': policy_type,
+                    'note': 'Can retrieve source chunks using semantic search'
+                }
             
             return rules
         
@@ -529,25 +632,27 @@ JSON:"""
             print(f"  [ERROR] {e}")
             return []
     
-    def _get_policy_section(self, leave_type):
-        """Extract relevant policy section"""
-        lines = self.policy_text.split('\n')
-        section = []
-        capture = False
-        
-        for line in lines:
-            if leave_type.lower() in line.lower():
-                capture = True
+    def _get_policy_section(self, policy_type):
+        """Extract relevant policy section from RAG using semantic search"""
+        try:
+            # Query RAG for relevant chunks
+            results = self.collection.query(
+                query_texts=[policy_type],
+                n_results=5
+            )
             
-            if capture:
-                section.append(line)
-                if len(section) > 80:
-                    break
-        
-        return '\n'.join(section) if section else ""
+            if results['documents']:
+                section = "\n".join(results['documents'][0][:5])
+                return section
+            else:
+                print(f"[WARNING] No relevant chunks found for {policy_type}")
+                return ""
+        except Exception as e:
+            print(f"[ERROR] RAG query failed: {e}")
+            return ""
     
     def save_rules(self, rules):
-         """Save rules to JSON with deduplication"""
+         """Save rules to JSON with RAG metadata and deduplication"""
          # Deduplicate by rule_id
          unique_rules = {}
          for rule in rules:
@@ -561,6 +666,15 @@ JSON:"""
          
          deduped_rules = list(unique_rules.values())
          
+         # Add RAG metadata to each rule
+         for rule in deduped_rules:
+             rule['_rag_metadata'] = {
+                 'vector_db': self.db_path,
+                 'collection': self.db_name,
+                 'generated_from': 'RAG (Retrieval Augmented Generation)',
+                 'note': 'Source chunks can be retrieved using semantic search on policy_name'
+             }
+         
          with open(self.output_file, 'w') as f:
              json.dump(deduped_rules, f, indent=2)
          
@@ -568,6 +682,8 @@ JSON:"""
              print(f"[SAVED] {self.output_file} ({len(rules)} → {len(deduped_rules)} rules, deduplicated)")
          else:
              print(f"[SAVED] {self.output_file} ({len(deduped_rules)} rules)")
+         
+         print(f"[RAG] All rules include metadata for RAG chunk references")
     
     def validate(self, rules):
         """Validate rules"""
@@ -621,6 +737,26 @@ def main():
                 rules = rule_extractor.extract_rules()
                 rule_extractor.save_rules(rules)
                 rule_extractor.validate(rules)
+                
+                # Step 3: Also extract grade hierarchies for detected policies
+                print(f"\n[GRADES] Extracting grade hierarchies...")
+                try:
+                    from grade_hierarchy_manager import GradeHierarchyExtractor
+                    grade_extractor = GradeHierarchyExtractor(api_key)
+                    
+                    # Get unique policy types from rules
+                    policy_types = set()
+                    for rule in rules:
+                        policy_types.add((rule.get('policy_id'), rule.get('policy_name')))
+                    
+                    for policy_id, policy_name in policy_types:
+                        grade_extractor.extract_for_policy(policy_id, policy_name)
+                    
+                    grade_extractor.close()
+                    print(f"[GRADES] Grade hierarchies extracted and stored in rules.db")
+                except Exception as e:
+                    print(f"[WARNING] Grade extraction skipped: {e}")
+            
             except Exception as e:
                 print(f"\n[ERROR] Rule extraction failed: {e}")
                 success = False

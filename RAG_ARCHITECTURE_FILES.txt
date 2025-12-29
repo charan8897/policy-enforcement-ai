@@ -1,0 +1,153 @@
+RAG ARCHITECTURE - FILE INVENTORY
+═════════════════════════════════════════════════════════════════════════════════
+
+CORE FILES (5 main components)
+─────────────────────────────────────────────────────────────────────────────────
+
+1. extract_policy.py (MAIN ENGINE)
+   - PolicyExtractor: Extract policy documents to Chroma RAG
+   - RuleExtractor: Extract rules from policy using Gemini LLM
+   - RuleEvaluator: Evaluate requests against rules
+   - Entry point for CLI operations
+   Lines: 788
+
+2. grade_hierarchy_manager.py (GRADE MANAGEMENT)
+   - GradeHierarchyDatabase: SQLite storage for grades
+   - GradeHierarchyExtractor: Extract grades dynamically from policies
+   - DynamicGradeEvaluator: Compare/lookup grades during evaluation
+   - Standalone CLI for grade operations
+   Lines: 450+
+
+3. rules_to_database.py (RULES STORAGE)
+   - RulesDatabase: SQLite schema & operations for rules
+   - RuleExtractorWithDB: Extract rules and save to database
+   - Standalone CLI for database operations
+   Lines: 600+
+
+4. api_server.py (REST API)
+   - Flask REST API with 6 endpoints
+   - Single & batch evaluation
+   - Rules & policy retrieval
+   - CORS enabled
+   Lines: 450+
+
+5. rag_utils.py (RAG UTILITIES)
+   - RAGManager: Manage Chroma vector database
+   - Semantic search utilities
+   - Policy listing & statistics
+   Lines: 150+
+
+DEPENDENCIES
+─────────────────────────────────────────────────────────────────────────────────
+
+Python Packages Required:
+  - chromadb (Vector database)
+  - langchain-text-splitters (Text chunking)
+  - google-generativeai (Gemini API)
+  - flask (REST API)
+  - flask-cors (CORS support)
+  - sqlite3 (Built-in)
+  - PyPDF2 (PDF extraction)
+  - Pandoc (Document conversion)
+  - pdftotext (Text extraction)
+  - Tesseract (OCR for scanned PDFs)
+
+EXTERNAL SERVICES
+─────────────────────────────────────────────────────────────────────────────────
+  - Google Gemini API (for LLM-based extraction)
+  - Chroma Vector Database (open-source, runs locally)
+
+DATA FILES GENERATED
+─────────────────────────────────────────────────────────────────────────────────
+
+1. ./chroma_db/
+   └── Vector database with policy chunks
+   └── Semantic search enabled
+
+2. rules.json
+   └── Extracted rules with RAG metadata
+   └── One-time generation per policy
+
+3. rules.db
+   └── SQLite database with:
+       - Extracted rules
+       - RAG metadata
+       - Grade hierarchies (per policy)
+       - Policy metadata
+
+TEST FILES CREATED
+─────────────────────────────────────────────────────────────────────────────────
+
+Test Suites:
+  - test_suite.py (6 basic tests)
+  - comprehensive_test_suite.py (10+ comprehensive tests)
+
+Test Data (various grades & scenarios):
+  - test_ov_md_approve.json
+  - test_ov_e8_approve.json
+  - test_ov_e7_approve.json
+  - test_ov_invalid_grade.json
+  - test_ov_unknown_grade.json
+  - test_ov_boundary_e7.json
+  - test_bt_reject.json
+  - test_bt_non_emp.json
+  - [30+ test result files]
+
+QUICK START
+─────────────────────────────────────────────────────────────────────────────────
+
+1. Extract Policy:
+   $ export GEMINI_API_KEY="your-key"
+   $ python3 extract_policy.py extract policy.pdf
+
+2. Generate Rules + Grades:
+   $ python3 extract_policy.py extract policy.pdf --rules
+
+3. Evaluate Request (CLI):
+   $ python3 extract_policy.py evaluate request.json
+
+4. Evaluate Request (API):
+   $ python3 api_server.py
+   $ curl -X POST http://localhost:5000/api/evaluate \
+     -H "Content-Type: application/json" \
+     -d '{"request_id": "REQ_001", "grade": "E8"}'
+
+5. Run Tests:
+   $ python3 test_suite.py
+   $ python3 comprehensive_test_suite.py
+
+ARCHITECTURE DIAGRAM
+─────────────────────────────────────────────────────────────────────────────────
+
+PDF/DOCX/TXT
+    ↓
+    ├─→ extract_policy.py::PolicyExtractor
+    │   ↓
+    └─→ Chroma RAG (./chroma_db/)
+        ↓
+        ├─→ extract_policy.py::RuleExtractor + Gemini LLM
+        │   ↓
+        │   ├─→ rules.json
+        │   └─→ Rule IDs + RAG metadata
+        │
+        └─→ grade_hierarchy_manager.py::GradeHierarchyExtractor + Gemini LLM
+            ↓
+            ├─→ rules.db (grade_hierarchies table)
+            └─→ Grade levels per policy
+
+Request (JSON)
+    ↓
+    ├─→ extract_policy.py::RuleEvaluator
+    │   ↓
+    │   ├─→ grade_hierarchy_manager.py::DynamicGradeEvaluator
+    │   │   ↓
+    │   │   └─→ Get grade level from rules.db
+    │   │
+    │   └─→ Match against rules.json
+    │       ↓
+    │       └─→ Decision (APPROVE/REJECT)
+    │
+    ├─→ CLI Output (test_*_result.json)
+    └─→ API Response (HTTP JSON)
+
+═════════════════════════════════════════════════════════════════════════════════
