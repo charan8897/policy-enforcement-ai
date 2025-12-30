@@ -637,18 +637,25 @@ class RuleExtractor:
             return []
         
         # Ask LLM to detect what policies are in the document
-        prompt = f"""
-    Analyze this policy document and list all main policy types/categories mentioned.
+        prompt = f"""STRICT POLICY DETECTION
 
-    Document excerpt:
-    {all_text[:3000]}
+        Document excerpt:
+        {all_text[:3000]}
 
-    Return ONLY a JSON array of policy names (strings), no explanation.
-    Example: ["Leave Policy", "Recruitment Policy", "Code of Conduct"]
+        TASK: Identify ONLY the distinct, major policy types/categories explicitly mentioned in this document.
 
-    Important: Extract the actual policy names from the document, not generic ones.
+        REQUIREMENTS:
+        1. Extract ONLY policies that have a distinct section or heading in the document
+        2. Use the EXACT policy names as they appear in the document
+        3. Do NOT infer or create generic policy names
+        4. List each policy name exactly as it appears (e.g., "Family and Medical Leave Act", not "Leave Policy")
+        5. Each policy should have clear rules or requirements associated with it
+        6. Return only substantive policies, skip trivial mentions
 
-    JSON array:"""
+        Return ONLY a JSON array with exact policy names from the document, NO explanation:
+        Example: ["Family and Medical Leave Act", "Americans with Disabilities Act"]
+
+        JSON array:"""
         
         try:
             response = self.model.generate_content(prompt)
@@ -680,34 +687,47 @@ class RuleExtractor:
         print(f"  [RAG] Querying for '{policy_type}'...")
         section = self._get_policy_section(policy_type)
         
-        prompt = f"""
-Extract all policy rules for "{policy_type}". Return ONLY valid JSON array.
+        prompt = f"""STRICT RULE EXTRACTION FOR "{policy_type}"
 
-Policy section:
-{section[:2000]}
+    Policy document section:
+    {section[:2000]}
 
-Example format:
-[
-  {{
-    "rule_id": "RULE_001",
+    REQUIREMENTS - FOLLOW STRICTLY:
+    1. Extract ONLY rules explicitly stated in the policy document
+    2. DO NOT infer, assume, or create rules not clearly mentioned
+    3. For REJECT actions: ONLY use when policy explicitly denies/prohibits something
+    4. For ELIGIBLE actions: ONLY use when policy explicitly allows something
+    5. For REQUIRE_DOCUMENTATION: ONLY when policy explicitly requires documentation
+    6. Conditions MUST match exact field values from the policy
+    7. If no clear condition in policy, use empty conditions array []
+    8. Rule action must be definitively supported by policy text
+
+    Output format (ONLY return valid JSON array, no other text):
+    [
+    {{
+    "rule_id": "RULE_POL_001",
     "policy_id": "POL_{policy_type.upper().replace(' ', '_')}",
     "policy_name": "{policy_type}",
-    "conditions": [{{"field": "field_name", "operator": "equals", "value": "value"}}],
-    "action": "ELIGIBLE",
-    "allocation": 8,
-    "period": "per_annum",
-    "message": "description",
-    "severity": "MEDIUM"
-  }}
-]
+    "conditions": [{{"field": "field_name", "operator": "equals", "value": "exact_value"}}],
+    "action": "ELIGIBLE|REJECT|APPROVE|REQUIRE_DOCUMENTATION|WARN",
+    "message": "Exact quote or precise summary from policy",
+    "severity": "HIGH|MEDIUM|LOW"
+    }}
+    ]
 
-Requirements:
-- Return ONLY JSON array
-- Valid actions: APPROVE, REJECT, ELIGIBLE, REQUIRE_DOCUMENTATION, WARN
-- Valid operators: equals, greater_than, less_than, greater_than_or_equals, in
-- Each rule needs: rule_id, policy_id, policy_name, conditions, action, message
+    Valid actions (use ONLY these, only when explicitly in policy):
+    - REJECT: Policy explicitly denies/prohibits this condition
+    - ELIGIBLE: Policy explicitly allows/approves this condition  
+    - APPROVE: Policy explicitly approves this condition
+    - REQUIRE_DOCUMENTATION: Policy explicitly requires documents
+    - WARN: Policy warns about something
 
-JSON:"""
+    Valid operators: equals, greater_than, less_than, greater_than_or_equals, in, not_equals
+
+    CONDITIONS: Add conditions ONLY if policy explicitly states "if X then Y"
+    Empty conditions [] = rule applies to all cases
+
+    Return ONLY the JSON array:"""
         
         try:
             response = self.model.generate_content(prompt)
