@@ -164,6 +164,52 @@ def get_rules_by_policy(policy_name):
         }), 500
 
 
+@app.route('/api/schema', methods=['GET'])
+def get_request_schema():
+    """
+    Get the request schema (required/optional fields based on extracted rules)
+    
+    Returns all unique condition field names from rules so frontend knows
+    what fields to expect in the request payload
+    """
+    if not evaluator:
+        return jsonify({
+            'error': 'Evaluator not initialized'
+        }), 503
+    
+    try:
+        # Extract all unique field names from all rules
+        required_fields = set()
+        optional_fields = set()
+        
+        for rule in evaluator.rules:
+            conditions = rule.get('conditions', [])
+            
+            # Any field in a condition is "required" for that rule
+            for condition in conditions:
+                field = condition.get('field')
+                if field:
+                    required_fields.add(field)
+        
+        # request_id is always required
+        required_fields.add('request_id')
+        
+        return jsonify({
+            'schema': {
+                'required_fields': sorted(list(required_fields)),
+                'optional_fields': sorted(list(optional_fields)),
+                'total_rules': len(evaluator.rules),
+                'policies': evaluator._get_policy_summary()
+            },
+            'message': 'Use these fields in your request payload. Only provide fields relevant to the policy being evaluated.'
+        }), 200
+    
+    except Exception as e:
+        return jsonify({
+            'error': str(e)
+        }), 500
+
+
 @app.route('/api/policies', methods=['GET'])
 def get_policies():
     """Get all policies with rule count"""

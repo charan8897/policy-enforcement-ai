@@ -239,13 +239,22 @@ class PolicyExtractor:
 class RuleEvaluator:
     """Evaluate user requests against extracted rules"""
     
-    def __init__(self, rules_file="rules.json", db_path="rules.db"):
-        """Initialize with rules and dynamic grade evaluator"""
-        if not os.path.exists(rules_file):
-            raise FileNotFoundError(f"Rules file not found: {rules_file}")
+    def __init__(self, rules_file="rules.json", db_path="rules.db", use_vector_db=True, vector_db_path="./chroma_db"):
+        """Initialize with rules from Vector DB or JSON"""
+        self.rules_file = rules_file
+        self.db_path = db_path
+        self.use_vector_db = use_vector_db
+        self.vector_db_path = vector_db_path
+        self.rules = []
+        self.grade_evaluator = None
         
-        with open(rules_file, 'r') as f:
-            self.rules = json.load(f)
+        # Try loading from vector DB first, fallback to JSON
+        if use_vector_db and chromadb:
+            if not self._load_rules_from_vector_db():
+                print("[FALLBACK] Loading rules from JSON file")
+                self._load_rules_from_file(rules_file)
+        else:
+            self._load_rules_from_file(rules_file)
         
         # Initialize dynamic grade evaluator
         try:
@@ -256,6 +265,110 @@ class RuleEvaluator:
             print(f"[WARNING] Could not load dynamic grades: {e}")
             print("[WARNING] Falling back to hardcoded grade hierarchy")
             self.grade_evaluator = None
+    
+    def _load_rules_from_file(self, rules_file):
+        """Load rules from JSON file"""
+        if not os.path.exists(rules_file):
+            raise FileNotFoundError(f"Rules file not found: {rules_file}")
+        
+        with open(rules_file, 'r') as f:
+            self.rules = json.load(f)
+        print(f"[RULES] Loaded {len(self.rules)} rules from {rules_file}")
+    
+    def _load_rules_from_vector_db(self):
+        """Load rules from Chroma vector database"""
+        if not chromadb:
+            return False
+        
+        try:
+            client = chromadb.PersistentClient(path=self.vector_db_path)
+            collection = client.get_or_create_collection(name="rules")
+            
+            # Get all rules from vector DB
+            all_results = collection.get()
+            
+            if not all_results['ids']:
+                print("[VECTOR_DB] No rules found in vector database")
+                return False
+            
+            # Reconstruct rules from metadata
+            self.rules = []
+            for i, rule_id in enumerate(all_results['ids']):
+                metadata = all_results['metadatas'][i]
+                # Parse the rule data from JSON string in metadata
+                rule_data = json.loads(metadata.get('rule_data', '{}'))
+                self.rules.append(rule_data)
+            
+            print(f"[VECTOR_DB] Loaded {len(self.rules)} rules from Chroma vector database")
+            return True
+        
+        except Exception as e:
+            print(f"[WARNING] Failed to load rules from vector DB: {e}")
+            return False
+    
+    def _generate_approval_reason(self, approvals, applicable_rules):
+        """Generate detailed approval reason with rule info"""
+        approval_rules = [a['rule_id'] for a in approvals]
+        
+        # Get rule details for context
+        rule_details = []
+        for rule in self.rules:
+            if rule['rule_id'] in approval_rules:
+                policy = rule.get('policy_name', 'Unknown Policy')
+                message = rule['message'][:100]
+                rule_details.append(f"{rule['rule_id']} ({policy}): {message}")
+        
+        reason = f"✓ Request APPROVED based on {len(approval_rules)} policy rule(s): "
+        reason += ", ".join(approval_rules) + ". "
+        
+        if rule_details:
+            reason += "Policy Details: " + " | ".join(rule_details[:2])
+        else:
+            reason += "All policy requirements satisfied."
+        
+        return reason
+    
+    def _generate_rejection_reason(self, violations, applicable_rules):
+        """Generate detailed rejection reason with rule info"""
+        violation_rules = [v['rule_id'] for v in violations]
+        
+        # Categorize violations
+        high_severity = [v for v in violations if v.get('severity') == 'HIGH']
+        critical_severity = [v for v in violations if v.get('severity') == 'CRITICAL']
+        
+        if critical_severity:
+            reason = f"Request REJECTED due to CRITICAL policy violation(s): "
+            reason += ", ".join([v['rule_id'] for v in critical_severity]) + ". "
+            reason += f"Reason: {critical_severity[0]['message'][:100]}"
+        elif high_severity:
+            reason = f"Request REJECTED: {len(high_severity)} HIGH severity rule(s) violated. "
+            reason += f"Primary issue - {high_severity[0]['rule_id']}: {high_severity[0]['message'][:100]}"
+        else:
+            reason = f"Request REJECTED due to {len(violations)} policy violation(s): "
+            reason += f"{violations[0]['rule_id']}: {violations[0]['message'][:100]}"
+        
+        return reason
+    
+    def _get_policy_summary(self):
+        """Get summary of policies and rules"""
+        summary = {}
+        for rule in self.rules:
+            policy = rule.get('policy_name', 'Unknown')
+            if policy not in summary:
+                summary[policy] = {'count': 0, 'fields': set()}
+            summary[policy]['count'] += 1
+            
+            for condition in rule.get('conditions', []):
+                summary[policy]['fields'].add(condition.get('field'))
+        
+        # Convert sets to lists for JSON serialization
+        return {
+            policy: {
+                'rule_count': info['count'],
+                'condition_fields': sorted(list(info['fields']))
+            }
+            for policy, info in summary.items()
+        }
     
     def evaluate(self, request):
         """Evaluate request against rules"""
@@ -294,27 +407,23 @@ class RuleEvaluator:
                         'message': rule['message'],
                         'severity': rule.get('severity', 'MEDIUM')
                     })
-                elif rule['action'] == 'ELIGIBLE':
+                elif rule['action'] in ['ELIGIBLE', 'APPROVE']:
                     approvals.append({
                         'rule_id': rule['rule_id'],
                         'allocation': rule.get('allocation'),
                         'period': rule.get('period')
                     })
-                elif rule['action'] == 'REQUIRE_DOCUMENTATION':
-                    violations.append({
-                        'rule_id': rule['rule_id'],
-                        'message': rule['message'],
-                        'required_doc': rule.get('required_doc'),
-                        'severity': rule.get('severity', 'MEDIUM')
-                    })
+                # REQUIRE_DOCUMENTATION and WARN are informational, not blocking
         
         # Build decision (Whitelist approach: only approve what's explicitly allowed)
         if violations:
             decision = 'REJECT'
-            primary_reason = violations[0]['message']
+            # Generate detailed reason for rejection
+            primary_reason = self._generate_rejection_reason(violations, applicable_rules)
         elif approvals:
             decision = 'APPROVE'
-            primary_reason = 'Request complies with all policies'
+            # Generate detailed reason for approval
+            primary_reason = self._generate_approval_reason(approvals, applicable_rules)
         else:
             decision = 'REJECT'
             primary_reason = 'Request type not recognized or no applicable policy rules found'
@@ -335,9 +444,9 @@ class RuleEvaluator:
         conditions = rule.get('conditions', [])
         
         if not conditions:
-            # Rules with no conditions are not applicable (skip them)
-            # Only rules with explicit conditions can be matched
-            return False, "No conditions specified"
+            # Rules with no conditions always match (apply to all requests)
+            # These are general rules like ELIGIBLE, REQUIRE_DOCUMENTATION, WARN
+            return True, "Always applicable (no conditions)"
         
         # All conditions must match (AND logic)
         for condition in conditions:
@@ -652,38 +761,92 @@ JSON:"""
             return ""
     
     def save_rules(self, rules):
-         """Save rules to JSON with RAG metadata and deduplication"""
+         """Save rules to Vector DB (Chroma) only - no JSON"""
          # Deduplicate by rule_id
          unique_rules = {}
          for rule in rules:
-             rule_id = rule.get('rule_id', '')
-             if rule_id not in unique_rules:
-                 unique_rules[rule_id] = rule
-             else:
-                 # Keep the more detailed version
-                 if len(json.dumps(rule)) > len(json.dumps(unique_rules[rule_id])):
-                     unique_rules[rule_id] = rule
+              rule_id = rule.get('rule_id', '')
+              if rule_id not in unique_rules:
+                  unique_rules[rule_id] = rule
+              else:
+                  # Keep the more detailed version
+                  if len(json.dumps(rule)) > len(json.dumps(unique_rules[rule_id])):
+                      unique_rules[rule_id] = rule
          
          deduped_rules = list(unique_rules.values())
          
          # Add RAG metadata to each rule
          for rule in deduped_rules:
-             rule['_rag_metadata'] = {
-                 'vector_db': self.db_path,
-                 'collection': self.db_name,
-                 'generated_from': 'RAG (Retrieval Augmented Generation)',
-                 'note': 'Source chunks can be retrieved using semantic search on policy_name'
-             }
+              rule['_rag_metadata'] = {
+                  'vector_db': self.db_path,
+                  'collection': 'rules',
+                  'generated_from': 'RAG (Retrieval Augmented Generation)',
+                  'note': 'Rules stored in vector DB for semantic search'
+              }
          
-         with open(self.output_file, 'w') as f:
-             json.dump(deduped_rules, f, indent=2)
+         # Save to Vector DB (Only storage)
+         self._save_rules_to_vector_db(deduped_rules)
          
          if len(deduped_rules) < len(rules):
-             print(f"[SAVED] {self.output_file} ({len(rules)} → {len(deduped_rules)} rules, deduplicated)")
+              print(f"[SAVED] {len(rules)} → {len(deduped_rules)} rules (deduplicated, stored in vector DB)")
          else:
-             print(f"[SAVED] {self.output_file} ({len(deduped_rules)} rules)")
-         
-         print(f"[RAG] All rules include metadata for RAG chunk references")
+              print(f"[SAVED] {len(deduped_rules)} rules to vector DB")
+    
+    def _save_rules_to_vector_db(self, rules):
+        """Save rules to Chroma vector database"""
+        if not chromadb:
+             print("[WARNING] chromadb not installed, skipping vector DB storage")
+             return
+        
+        try:
+             client = chromadb.PersistentClient(path=self.db_path)
+             collection = client.get_or_create_collection(
+                  name="rules",
+                  metadata={"hnsw:space": "cosine"}
+             )
+             
+             # Prepare documents and metadata for vector storage
+             documents = []
+             metadatas = []
+             ids = []
+             
+             for rule in rules:
+                  rule_id = rule.get('rule_id', '')
+                  policy_name = rule.get('policy_name', 'Unknown')
+                  action = rule.get('action', 'UNKNOWN')
+                  message = rule.get('message', '')
+                  
+                  # Document text for embedding
+                  doc_text = f"{rule_id}: {policy_name} - {action}. {message}"
+                  
+                  documents.append(doc_text)
+                  ids.append(rule_id)
+                  
+                  metadatas.append({
+                       'rule_id': rule_id,
+                       'policy_name': policy_name,
+                       'action': action,
+                       'severity': rule.get('severity', 'MEDIUM'),
+                       'rule_data': json.dumps(rule)  # Store full rule as JSON string
+                  })
+             
+             # Clear existing rules in collection (if any exist)
+             try:
+                  collection.delete(where={})
+             except:
+                  pass  # Collection might be empty
+             
+             # Add new rules to vector DB
+             collection.add(
+                  documents=documents,
+                  metadatas=metadatas,
+                  ids=ids
+             )
+             
+             print(f"[VECTOR_DB] Saved {len(rules)} rules to Chroma collection 'rules'")
+        
+        except Exception as e:
+             print(f"[WARNING] Failed to save rules to vector DB: {e}")
     
     def validate(self, rules):
         """Validate rules"""
