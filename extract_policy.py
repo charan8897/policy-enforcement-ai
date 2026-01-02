@@ -701,6 +701,8 @@ class RuleExtractor:
     6. Conditions MUST match exact field values from the policy
     7. If no clear condition in policy, use empty conditions array []
     8. Rule action must be definitively supported by policy text
+    9. IDENTIFY SECTION: Determine which section/subsection each rule belongs to
+    10. Extract rules grouped by their policy sections and subsections
 
     Output format (ONLY return valid JSON array, no other text):
     [
@@ -708,6 +710,8 @@ class RuleExtractor:
     "rule_id": "RULE_POL_001",
     "policy_id": "POL_{policy_type.upper().replace(' ', '_')}",
     "policy_name": "{policy_type}",
+    "section": "Name of the main section or subsection this rule belongs to",
+    "subsection": "Detailed subsection name if applicable",
     "conditions": [{{"field": "field_name", "operator": "equals", "value": "exact_value"}}],
     "action": "ELIGIBLE|REJECT|APPROVE|REQUIRE_DOCUMENTATION|WARN",
     "message": "Exact quote or precise summary from policy",

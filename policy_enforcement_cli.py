@@ -479,6 +479,64 @@ class PolicyEnforcementCLI:
             json.dump(result, f, indent=2)
         self.print_success(f"Result saved to: {result_file}")
     
+    def display_policies(self):
+        """Display all extracted policies with detailed sections"""
+        self.print_header("EXTRACTED POLICIES & RULES")
+        
+        try:
+            response = requests.get(f"{self.api_url}/api/policies", timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                policies = data.get('policies', {})
+                
+                if not policies:
+                    self.print_warning("No policies found")
+                    return
+                
+                print(f"{BOLD}Total Policies: {data.get('total_policies', 0)}{RESET}\n")
+                
+                for i, (policy_name, policy_info) in enumerate(sorted(policies.items()), 1):
+                    rule_count = policy_info.get('rule_count', 0)
+                    print(f"{BOLD}{i}. {policy_name}{RESET}")
+                    print(f"   Rules: {rule_count}")
+                    
+                    # Get rules for this policy
+                    policy_rules_response = requests.get(
+                        f"{self.api_url}/api/rules/by-policy/{policy_name}",
+                        timeout=5
+                    )
+                    
+                    if policy_rules_response.status_code == 200:
+                        policy_data = policy_rules_response.json()
+                        rules = policy_data.get('rules', [])
+                        
+                        # Group rules by section if available
+                        sections = {}
+                        for rule in rules:
+                            section = rule.get('section', 'General')
+                            if section not in sections:
+                                sections[section] = []
+                            sections[section].append(rule)
+                        
+                        # Display grouped rules
+                        for section, section_rules in sorted(sections.items()):
+                            print(f"   {BLUE}├─ {section} ({len(section_rules)} rules){RESET}")
+                            for rule in section_rules[:5]:  # Show first 5 rules per section
+                                rule_id = rule.get('rule_id', 'N/A')
+                                message = rule.get('message', '')
+                                short_msg = (message[:60] + '...') if len(message) > 60 else message
+                                print(f"   {BLUE}│  ├─ {rule_id}: {short_msg}{RESET}")
+                            
+                            if len(section_rules) > 5:
+                                print(f"   {BLUE}│  └─ ... and {len(section_rules) - 5} more rules{RESET}")
+                    
+                    print()
+            else:
+                self.print_error(f"Failed to fetch policies: {response.status_code}")
+        
+        except Exception as e:
+            self.print_error(f"Could not display policies: {e}")
+    
     def run_interactive_loop(self):
         """Run interactive evaluation loop"""
         self.print_header("INTERACTIVE REQUEST EVALUATION")
